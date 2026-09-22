@@ -14,6 +14,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Byte-compile all Python sources
-        run: python -m compileall -q server poc
+        run: python -m compileall -q server poc evals
       - name: Unit tests
         run: python -m unittest discover -s server -p "test_*.py" -v
+      - name: Evaluation tooling tests
+        run: python -m unittest discover -s evals -p "test_*.py" -v

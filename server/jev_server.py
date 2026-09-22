@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Jev Codex Router — local server on 127.0.0.1:4319 for the Codex Router.
+"""Laya Codex Router — local server on 127.0.0.1:4319 for the Codex Router.
 
 Receives Responses requests destined for the "jev/auto" model (the Codex
-Router's "jev" generic provider), asks Jev (TypeSafe System One) for a tier
-and a thinking depth, applies the routing policy, then relays to the Codex
-Router's local caller edge (native session sharing enabled) — with no format
-conversion: Responses in, Responses out, SSE relayed verbatim.
+Router's "jev" compatibility provider), asks the selected decision backend
+(local Laya by default, or optional Jev) for a tier and thinking depth, applies
+the routing policy, then relays to the Codex Router's local caller edge (native
+session sharing enabled) — with no format conversion: Responses in, Responses
+out, SSE relayed verbatim.
 
-Routing policy: Jev chooses one (model, thinking effort) pair for every call.
-Every pair uses standard speed. Confidence is logged without changing the chosen
-model. There are no keyword/scenario overrides or target model proportions.
-Technical Jev failures remain fail-open to astra @medium and are logged separately.
+Routing policy: the decision backend chooses one (model, thinking effort) pair
+for every turn. Every pair uses standard speed. Confidence is logged without
+changing the chosen model. There are no keyword/scenario overrides or target
+model proportions. Technical decision failures remain fail-open to astra
+@medium and are logged separately.
 
 Turn-scoped sticky routing (v4): Jev decides once per turn, not once per call.
 The first call of a turn (a user message) opens it; every continuation of that
@@ -78,9 +80,12 @@ import http.client
 import json
 import os
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
@@ -93,10 +98,25 @@ CALLER_SECRET_PATH = os.path.join(STATE, "caller-secret")
 OFF_PATH = os.path.join(STATE, "jev-router.off")
 SHADOW_PATH = os.path.join(STATE, "jev-router.shadow")
 DEBUG_PATH = os.path.join(STATE, "jev-router.debug")
-# Opt-in route header on each assistant text message. Presentation metadata is
-# removed from replayed history, including legacy trailing signatures.
+# Route header on each assistant text message. Presentation metadata is removed
+# from replayed history, including legacy trailing signatures. The header is
+# on by default so users can identify the served model in the Codex thread.
+# Create SIGNATURE_OFF_PATH to suppress it for a local deployment.
 SIGNATURE_PATH = os.path.join(STATE, "jev-router.signature")
+SIGNATURE_OFF_PATH = os.path.join(STATE, "jev-router.signature.off")
 LOG_PATH = os.path.join(STATE, "jev-router-live.jsonl")
+BACKEND_PATH = os.path.join(STATE, "decision-backend")
+
+
+def decision_backend():
+    try:
+        with open(BACKEND_PATH, encoding="utf-8") as fh:
+            value = fh.read().strip()
+    except FileNotFoundError:
+        return "laya"
+    if value not in ("jev", "laya"):
+        raise ValueError("unknown decision backend")
+    return value
 
 # Turn-scoped routing: one decision opens a turn, its continuations reuse it.
 TURN_TTL = 1800.0          # a turn keeps its route for at most this long
@@ -108,11 +128,14 @@ _TURNS_LOCK = threading.Lock()
 LISTEN = ("127.0.0.1", 4319)
 ROUTER = ("127.0.0.1", 4202)
 
-DISPLAY_NAME = "Jev Codex Router"
+DISPLAY_NAME = "Laya Codex Router"
 VERSION = "1.3"
 
 API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
+# A socket-I/O timeout, not a total wall-clock deadline. The old 4-second
+# allowance caused technical fallbacks during the paired routing evaluation.
+ROUTING_TIMEOUT = 10.0
 
 
 # Generic ask surface (POST /ask): a thin typed pass-through to System One for
@@ -126,8 +149,8 @@ ASK_TIMEOUT = 15.0
 ASK_TYPES = ("noul", "choice", "score")
 
 # Codex-dry tandem: used ONLY while native (ChatGPT) usage is exhausted.
-GO_STANDARD = "deepseek/deepseek-v4.1-flash"
-GO_FRONTIER = "deepseek/deepseek-v4.1-flash"
+GO_STANDARD = "opencode-go/deepseek-v4.1-flash"
+GO_FRONTIER = "opencode-go/glm-5.3-flash"
 GO_TANDEM = (GO_STANDARD, GO_FRONTIER)
 # The tandem's own thinking ladder. Both Go models declare low/high/max where the
 # native triptych exposes low/medium/high/xhigh/max, so a depth keeps its meaning
@@ -204,6 +227,8 @@ _log_lock = threading.Lock()
 
 def load_key():
     """TYPESAFE_API_KEY: env files win (the process environment can be stale)."""
+    if decision_backend() == "laya":
+        return "local-no-key-required"
     for path in (ENV_PATH, os.path.join(HOME, ".jev.env")):
         try:
             with open(path, encoding="utf-8") as fh:
@@ -353,9 +378,30 @@ def call_jev(key, state, questions=None, timeout=4.0):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def call_jev_routed(key, state, questions=None, timeout=4.0):
-    """One System One call, on the direct TypeSafe API."""
+def call_jev_routed(key, state, questions=None, timeout=ROUTING_TIMEOUT):
+    """One decision call; the local backend never calls TypeSafe."""
+    if decision_backend() == "laya":
+        from laya_backend import predict
+        return predict(state, questions)
     return call_jev(key, state, questions, timeout=timeout)
+
+
+def jev_error_details(exc):
+    """Bounded diagnostic categories: never persist exception text or URLs."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return {"category": "http", "status": exc.code}
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return {"category": "timeout"}
+    if isinstance(reason, ssl.SSLError):
+        return {"category": "tls"}
+    if isinstance(reason, socket.gaierror):
+        return {"category": "dns"}
+    if isinstance(exc, urllib.error.URLError):
+        return {"category": "network"}
+    if isinstance(exc, ValueError):
+        return {"category": "invalid_response"}
+    return {"category": "other"}
 
 
 def validate_ask(body):
@@ -543,7 +589,7 @@ def classify(payload):
 
 
 def jev_state(task, prev_assistant, signals, step):
-    """The state sent to Jev: the current ask plus signals that do not grow.
+    """State sent to the decision backend: the ask plus bounded signals.
 
     `n_items` is deliberately left out. It is the one number that scales with the
     thread, and the calibrated shapes (backtest, shadow replay) never carried it,
@@ -691,18 +737,26 @@ def route_marker(model, effort):
 
 
 def answer_signature(shown):
-    """Leading model/thinking label for each assistant message, when enabled."""
-    if not os.path.exists(SIGNATURE_PATH):
+    """Leading model/thinking label for each assistant message.
+
+    The visible route header is enabled unless signature.off exists.
+    """
+    if os.path.exists(SIGNATURE_OFF_PATH):
         return None
     short, glyph = route_label(shown.get("model"))
     effort = shown.get("effort") or "non spécifié"
+    if decision_backend() == "laya":
+        gate = shown.get("gate", "unknown")
+        status = "Laya local" if gate == "apply" else f"Laya fallback: {gate}"
+        return f"**[Router] {shown.get('model')} | {effort} | {status}**\n\n"
     return f"**{glyph} {short} · thinking: {effort}**\n\n"
 
 
 # Only our exact presentation forms, at the boundaries of assistant text.
 # Retain the trailing form solely for old transcripts.
 HEADER_RX = re.compile(
-    r"\A\*\*(?:⚡|🧠|🚀|🌍|🐳|✨) [A-Za-z0-9._/-]+ · thinking: "
+    r"\A\*\*\[Router\] [A-Za-z0-9._/-]+ \| [A-Za-z ]+ \| Laya [^\r\n*]+\*\*\r?\n\r?\n"
+    r"|\A\*\*(?:⚡|🧠|🚀|🌍|🐳|✨) [A-Za-z0-9._/-]+ · thinking: "
     r"(?:low|medium|high|xhigh|max|non spécifié)\*\*\r?\n\r?\n")
 SIGNATURE_RX = re.compile(
     r"\s*\n*—\s+(?:⚡|🧠|🚀|🌍|🐳|✨)\s+[A-Za-z0-9._/-]+"
@@ -1139,7 +1193,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif path in ("/health", ""):
             self._json(200, {"ok": True, "service": "jev-router", "version": VERSION,
-                             "policy_version": POLICY_VERSION})
+                             "policy_version": POLICY_VERSION,
+                             "decision_backend": decision_backend()})
         else:
             self._json(404, {"error": {"message": "not found"}})
 
@@ -1191,10 +1246,11 @@ class Handler(BaseHTTPRequestHandler):
         jev_ms = None
         decision = None
         jev_usage = None
+        jev_error = None
         sticky = False
         # One decision per turn: the first call opens the route, every
         # continuation of the same turn reuses it (see turn_route_lookup).
-        scope = turn_scope(payload, task)
+        scope = decision_backend() + ":" + turn_scope(payload, task)
         n_items = signals.get("n_items") or 0
         held = None if os.path.exists(OFF_PATH) else turn_route_lookup(
             scope, task, step, n_items)
@@ -1206,6 +1262,7 @@ class Handler(BaseHTTPRequestHandler):
             gate = held["gate"]
             tier, depth, conf = held["tier"], held["depth"], held["conf"]
             decision = held["decision"]
+            jev_error = held.get("jev_error")
         else:
             key = load_key()
             if key and (task or step.get("digest") or signals.get("has_image")):
@@ -1224,13 +1281,15 @@ class Handler(BaseHTTPRequestHandler):
                                          decision["confidence"])
                     model, effort, speed, gate = route(tier, depth)
                 except Exception as exc:
-                    model, effort, speed, gate = ASTRA, "medium", "default", f"jev_error:{type(exc).__name__}"
+                    model, effort, speed, gate = ASTRA, "medium", "default", f"{decision_backend()}_error:{type(exc).__name__}"
+                    jev_error = jev_error_details(exc)
                 jev_ms = int((time.time() - jt0) * 1000)
             else:
                 model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
             turn_route_remember(scope, task, {
                 "model": model, "effort": effort, "speed": speed, "gate": gate,
                 "tier": tier, "depth": depth, "conf": conf, "decision": decision,
+                "jev_error": jev_error,
             }, n_items)
 
         would = None
@@ -1250,7 +1309,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Display the model actually serving the request, including shadow and
         # operational fallbacks, rather than a hypothetical classification.
-        shown = {"model": model, "effort": effort or (payload.get("reasoning") or {}).get("effort")}
+        shown = {"model": model, "effort": effort or (payload.get("reasoning") or {}).get("effort"),
+                 "gate": gate}
         marker = route_marker(shown["model"], shown["effort"])
         signature = answer_signature(shown)
 
@@ -1290,7 +1350,7 @@ class Handler(BaseHTTPRequestHandler):
             dry_reason = "quota"
             gate = f"codex_dry(retry):{native_model}"
             marker = route_marker(model, effort)
-            signature = answer_signature({"model": model, "effort": effort})
+            signature = answer_signature({"model": model, "effort": effort, "gate": gate})
             status, out_kind, ctype, quota_hit, unwritten, _resets_at = self._forward(
                 payload, out_path, stream_requested, debug, marker, model, signature)
         elif status == 200 and not dry_reason and model in TIERS and os.path.exists(DRY_STATE_PATH):
@@ -1308,7 +1368,7 @@ class Handler(BaseHTTPRequestHandler):
             apply_route(payload, model, effort)
             gate = f"codex_dry(fallback):{native_model}"
             marker = route_marker(model, effort)
-            signature = answer_signature({"model": model, "effort": effort})
+            signature = answer_signature({"model": model, "effort": effort, "gate": gate})
             status, out_kind, ctype, quota_hit, unwritten, _resets_at = self._forward(
                 payload, out_path, stream_requested, debug, marker, model, signature)
         if unwritten is not None:
@@ -1324,10 +1384,13 @@ class Handler(BaseHTTPRequestHandler):
 
         log_line({
             "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "policy_version": POLICY_VERSION,
+            "policy_version": "laya-local-v1" if decision_backend() == "laya" else POLICY_VERSION,
+            "decision_backend": decision_backend(),
+            "decision_error": jev_error,
             "route_probabilities": decision["probabilities"] if decision else None,
             "chosen_probability": decision["chosen_probability"] if decision else None,
             "jev_usage": jev_usage,
+            "jev_error": jev_error,
             "attempts": self._attempts,
             "gate": gate,
             "tier": tier,
@@ -1472,6 +1535,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    if decision_backend() == "laya":
+        from laya_backend import predict
+        predict({"task": "warmup"})
     server = ThreadingHTTPServer(LISTEN, Handler)
     server.daemon_threads = True
     try:

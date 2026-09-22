@@ -1,22 +1,25 @@
 # AGENTS.md — autonomous install & operations playbook
 
 This file lets a coding agent (Codex, Claude Code, Cursor, …) install, verify
-and operate the **Jev Codex Router** on a user's machine without asking for
+and operate the **Laya Codex Router** on a user's machine without asking for
 context it can discover itself. Follow it top to bottom. Do not skip the
 verification step after each stage — they are what makes autonomy safe here.
 
 ## What you are installing
 
 A local server plus a Codex Router extension that adds one model to the Codex
-picker — **"Jev Codex Router"** (`jev/auto`). Every turn sent to it is classified by
-[Jev](https://docs.typesafe.ai) (TypeSafe System One) and served by the
-cheapest model that can handle it, at a thinking depth adapted to the task.
-All traffic stays on loopback; the design is fail-open; there is a kill switch.
+picker — **"Laya Codex Router"** (`jev/auto`, retained as a compatibility
+slug). Every turn sent to it is classified locally by
+[Laya](https://github.com/NandhaKishorM/laya) and served by the selected native
+Codex model at an adapted thinking depth. All traffic stays on loopback; the
+design is fail-open; there is a kill switch. The original Jev decision backend
+remains optional and is not needed for the default installation.
 
 ## Hard rules (never violate)
 
-1. **Never print, log, commit, or transmit secrets** — the TypeSafe API key,
-   the router `caller-secret`, or ChatGPT tokens. Reference them by file path.
+1. **Never print, log, commit, or transmit secrets** — the optional TypeSafe
+   API key, the router `caller-secret`, or ChatGPT tokens. Reference them by
+   file path.
 2. **Edit the source, never the artifact.** `<router checkout>/src/` is the
    router's own source and is meant to be edited: a behaviour bug is fixed
    there, committed on the checkout's branch, with the tests that cover it.
@@ -42,23 +45,38 @@ All traffic stays on loopback; the design is fail-open; there is a kill switch.
   Check: `<router checkout>/bin/codex-router status` → expect
   `{"state":"running"}`; `./bin/codex-router providers generic list` must exist.
 - **Python ≥ 3.11** — `python3 -V`.
-- A **TypeSafe API key** for Jev. The server looks for `TYPESAFE_API_KEY` in
-  `~/.hermes/.env` first, then `~/.jev.env`, then the process environment.
-  If none exists, **stop and ask the user where their key file is — never ask
-  for the key value itself in chat.**
+- Network access during installation to clone Laya and download its public
+  multilingual checkpoint. Inference is local after the checkpoint is cached.
+- A **TypeSafe API key is not required** for the default Laya backend. It is
+  needed only if the user deliberately selects the optional `jev` backend.
 
 ## Install, step by step
 
-### 1 — Start the server
+### 1 — Install Laya and its public checkpoint
 
 ```bash
 cd <repo>
-python3 server/jev_server.py &            # long-lived; launchd service in step 6
+bash server/install-laya-runtime.sh
+printf 'laya\n' > ~/.codex/codex-router/decision-backend
+```
+
+The script creates or reuses the sibling checkout `<repo>/../laya`, installs it
+into `<repo>/../laya/.venv`, downloads only the multilingual checkpoint, and
+runs a local prediction. It never reads or prints Codex or ChatGPT credentials.
+Set `LAYA_ROOT` or `LAYA_MODEL_PATH` only when using a different layout.
+
+### 2 — Start the server
+
+```bash
+cd <repo>
+../laya/.venv/bin/python server/jev_server.py &  # long-lived; launchd in step 7
 curl -s http://127.0.0.1:4319/health      # expect: {"ok": true, "service": "jev-router"}
 curl -s http://127.0.0.1:4319/v1/models   # expect: one model, id "auto"
 ```
 
-### 2 — Declare the model
+The health response must include `"decision_backend":"laya"`.
+
+### 3 — Declare the model
 
 Create `~/.codex/codex-router/user-models.json` (hand-editable state file; if
 it already has `models`, append to the array instead of overwriting):
@@ -74,8 +92,8 @@ it already has `models`, append to the array instead of overwriting):
       "upstreamModel": "auto",
       "provider": "jev",
       "listed": true,
-      "displayName": "Jev Codex Router",
-      "description": "Auto-routing by Jev (TypeSafe): every turn is classified and served by luna, sol or astra at the thinking depth it needs.",
+      "displayName": "Laya Codex Router",
+      "description": "Local routing by Laya: every turn is classified and served by luna, sol or astra at the thinking depth it needs.",
       "priority": 95,
       "defaultEffort": "medium",
       "reasoningLevels": [
@@ -93,17 +111,17 @@ it already has `models`, append to the array instead of overwriting):
 }
 ```
 
-### 3 — Register the generic provider (router CLI)
+### 4 — Register the generic provider (router CLI)
 
 ```bash
 cd <router checkout>
-./bin/codex-router providers generic add jev --name "Jev Router" \
+./bin/codex-router providers generic add jev --name "Laya Router" \
   --base-url http://127.0.0.1:4319/v1 --adapter openai-responses --allow-private
 ./bin/codex-router providers generic list
-# expect:  SHOW jev   Jev Router (openai-responses)
+# expect:  SHOW jev   Laya Router (openai-responses)
 ```
 
-### 4 — Share native ChatGPT access with local clients
+### 5 — Share native ChatGPT access with local clients
 
 ```bash
 ./bin/codex-router chatgpt-session enable
@@ -111,14 +129,14 @@ cd <router checkout>
 # for about NNNh)". Re-run this when native calls later return Unauthorized.
 ```
 
-### 5 — Publish and show
+### 6 — Publish and show
 
 ```bash
 ./bin/codex-router refresh-catalog        # merged catalog must now contain "jev/auto"
 ./bin/control picker set jev/auto show    # returns the picker JSON with jev/auto visible
 ```
 
-### 6 — Persistent service (optional)
+### 7 — Persistent service (optional)
 
 Ask the user to run, in **their own Terminal**:
 
@@ -129,10 +147,10 @@ bash <repo>/server/install-service.sh     # launchd service, keep-alive, logs in
 Alternative (any scheduler, every 5 min): `<repo>/server/watchdog.sh` —
 silent when healthy, restarts the server when down.
 
-### 7 — Restart Codex
+### 8 — Restart Codex
 
 Fully quit and reopen the Codex app so it reloads the picker catalog, then the
-user can select **Jev Codex Router**.
+user can select **Laya Codex Router**.
 
 ## End-to-end verification (must pass before declaring success)
 
@@ -143,26 +161,27 @@ curl -s -N -m 120 -X POST "http://127.0.0.1:4202/_codex-router/$SEC/v1/responses
   -d '{"model":"jev/auto","input":[{"role":"user","content":[{"type":"input_text","text":"Say OK"}]}],"stream":true}' | head -c 400
 ```
 
-Expect an SSE stream: `data: {"type":"response.created",...,"model":"gpt-5.6-luna",…`
-(a trivial prompt routes to luna) ending with `response.completed` and
-`data: [DONE]`. Then:
+Expect an SSE stream ending with `response.completed` and `data: [DONE]`. The
+selected model depends on Laya's decision and is not asserted in advance. Then:
 
 ```bash
 tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 # expect one JSON line: gate=apply, tier, conf, depth, model, effort, speed,
-# jev_ms, total_ms, status=200, out=sse
+# decision_backend=laya, decision_ms, total_ms, status=200, out=sse
 ```
 
 ## Operations
 
 - **Decision log**: `~/.codex/codex-router/jev-router-live.jsonl` — one line per
   routed turn.
-- **Ask surface**: `POST /ask` (also `/v1/ask`) — typed pass-through to System
-  One for local callers with their own question set (state ≤ 120k chars, ≤ 40
-  questions, caller state never logged). `502 jev: HTTP Error 402` means the
-  TypeSafe account is out of credits; `503` means no key was found.
+- **Ask surface**: `POST /ask` (also `/v1/ask`) — typed decisions from the
+  selected backend for local callers with their own question set (state ≤ 120k
+  chars, ≤ 40 questions, caller state never logged). With the optional Jev
+  backend, `502 jev: HTTP Error 402` means the TypeSafe account is out of
+  credits and `503` means no key was found.
 - **Kill switch** (instant, no restart): `touch ~/.codex/codex-router/jev-router.off`
-  → the server relays to astra without calling Jev. Remove the file to re-enable.
+  → the server relays to astra without calling the decision backend. Remove the
+  file to re-enable.
 - **Codex-dry tandem** (only while native usage is exhausted):
   `touch ~/.codex/codex-router/jev-router.codex-dry` → frontier-tier calls go to
   `opencode-go/glm-5.3-flash`, every other tier to
@@ -197,7 +216,7 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 | `{"detail":"Unauthorized"}` from the caller edge | native sharing off | `./bin/codex-router chatgpt-session enable` |
 | `{"detail":"Stream must be set to true"}` | the caller edge streams only | send `"stream": true`; the bundled server forces it |
 | HTTP 502 `provider_api_proxy_error` on jev-auto | server-side error | check the `status`/`out` fields in `jev-router-live.jsonl`, and the server's stderr log |
-| "Jev Codex Router" absent from the picker | not published/visible, or Codex not restarted | `refresh-catalog`, `control picker set jev/auto show`, full Codex restart |
+| "Laya Codex Router" absent from the picker | not published/visible, or Codex not restarted | `refresh-catalog`, `control picker set jev/auto show`, full Codex restart |
 | Native 429 / "usage limit" while routing | ChatGPT usage window exhausted | expected: the Codex-dry tandem takes over (`jev-router.codex-dry.json`); delete the manual file to re-probe sooner |
 | Jev calls fail with `402 Payment Required` (`gate=codex_dry(fallback)`, `tier` null in the log) | the TypeSafe account is out of credits | expected: the router keeps serving through the tandem; add credits at console.typesafe.ai to restore classification |
 | `Unknown API gateway model: jev-auto` | catalog not republished | `./bin/codex-router refresh-catalog` |
@@ -207,17 +226,20 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 
 ## Latency & cost notes
 
-- The current policy is `joint-v1-standard`: Jev chooses one of 15 model/effort
+- The current policy is `joint-v2-quality`: the decision backend chooses one of 15 model/effort
   pairs **per turn** — the call that opens a turn (a user message) decides, and
   every continuation of that turn (tool steps, retries, the call that follows a
   mid-turn compaction) reuses that route. A new user ask opens the next turn.
   All tiers use adaptive effort and standard speed; never force
   Luna to max or enable Fast mode.
+- Quality is primary. Assess the whole turn's required reasoning and verification;
+  do not treat an easy first action as evidence that the whole turn is easy.
+  See `ROUTING_POLICY.md` for source provenance and the evaluation procedure.
 - No scenario overrides, target model shares, or confidence threshold may
   replace a valid Jev choice with Sol, Luna or Astra. Confidence is diagnostic.
 - Provider/schema failures remain distinct: Astra at medium, logged as a
   technical fallback. Kill switch and exhausted-native-quota handling still apply.
-- Jev usage and upstream per-attempt tokens are logged when available. Run
+- Decision-backend usage and upstream per-attempt tokens are logged when available. Run
   `python3 server/report_routing.py --days 7` for native-only credit estimates;
   unknown usage remains unknown and reasoning tokens are not counted twice.
 - `BACKTEST.md` documents the old policy's fixed-token simulation. It is not a

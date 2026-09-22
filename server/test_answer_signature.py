@@ -7,6 +7,9 @@ import jev_server as jev
 
 
 class AnswerHeader(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.object(jev, "decision_backend", return_value="jev"))
+
     HEADER = "**🧠 sol · thinking: low**\n\n"
     TAG = " · 🧠 sol:low · "
     LEGACY = "\n\n— 🧠 sol · low"
@@ -142,7 +145,7 @@ class AnswerHeader(unittest.TestCase):
             {"role": "assistant", "content": "An example:\n" + self.HEADER + "quoted"},
             {"role": "user", "content": [{"type": "input_text", "text": self.HEADER + "user text"}]},
         ]}
-        with mock.patch.object(jev.os.path, "exists", return_value=False):
+        with mock.patch.object(jev.os.path, "exists", side_effect=lambda path: path == jev.SIGNATURE_OFF_PATH):
             self.assertEqual(jev.strip_signatures(payload), 2)
         self.assertEqual(payload["input"][0]["content"][0]["text"], "answer")
         self.assertEqual(payload["input"][1]["content"], "old answer")
@@ -150,10 +153,15 @@ class AnswerHeader(unittest.TestCase):
         self.assertEqual(payload["input"][3]["content"][0]["text"], self.HEADER + "user text")
 
     def test_header_generation_uses_the_actual_route_and_handles_unknown_effort(self):
-        with mock.patch.object(jev.os.path, "exists", return_value=True):
+        with mock.patch.object(jev.os.path, "exists", return_value=False):
             self.assertEqual(jev.answer_signature({"model": jev.SOL, "effort": "low"}), self.HEADER)
             self.assertIn("thinking: non spécifié", jev.answer_signature({"model": jev.ASTRA}))
-        with mock.patch.object(jev.os.path, "exists", return_value=False):
+
+    def test_header_can_be_disabled_explicitly(self):
+        with mock.patch.object(
+            jev.os.path, "exists",
+            side_effect=lambda path: path == jev.SIGNATURE_OFF_PATH,
+        ):
             self.assertIsNone(jev.answer_signature({"model": jev.LUNA, "effort": "low"}))
 
 

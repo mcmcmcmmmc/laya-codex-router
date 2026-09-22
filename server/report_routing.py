@@ -413,7 +413,7 @@ def table(headers, rows):
 
 def render_text(rep):
     total = rep["window"]["turns"]
-    lines = ["Jev Codex Router — routing report",
+    lines = ["Laya Codex Router — routing report",
              f"window: last {rep['window']['days']} day(s)"
              + (f" ({rep['window']['from']} → {rep['window']['to']})" if total else "")
              + f" · {total} turns of {rep['window']['log_lines']} log lines"]

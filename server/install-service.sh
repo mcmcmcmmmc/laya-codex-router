@@ -1,14 +1,18 @@
 #!/bin/zsh
-# Install (or re-install) the Jev Router launchd service.
+# Install (or re-install) the Laya Router launchd service.
 # Run ONCE by the user, from THEIR Terminal (launchctl is deliberately
 # restricted inside supervised agents).
 #
-#   bash ~/Documents/Github/jev-codex-router/server/install-service.sh
+#   bash ~/github/laya-codex-router/server/install-service.sh
 #
 set -e
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="$(command -v /usr/local/bin/python3 || command -v python3)"
+PYTHON="${JEV_PYTHON:-$(command -v /usr/local/bin/python3 || command -v python3)}"
+BACKEND="$(cat "$HOME/.codex/codex-router/decision-backend" 2>/dev/null || printf 'laya')"
+if [ -z "${JEV_PYTHON:-}" ] && [ "$BACKEND" != jev ]; then
+  PYTHON="$REPO/../laya/.venv/bin/python"
+fi
 LABEL="${JEV_ROUTER_LABEL:-com.thibaultsaintjean.jev-router}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGDIR="$HOME/Library/Logs"
@@ -43,9 +47,15 @@ launchctl bootout "gui/$(id -u)/io.0xnatoshi.jev-router" 2>/dev/null || true
 pkill -f "jev_server.py" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-sleep 1.5
-if curl -s -m 5 http://127.0.0.1:4319/health; then
+for attempt in {1..90}; do
+  curl -sf -m 2 http://127.0.0.1:4319/health >/dev/null 2>&1 && break
+  sleep 1
+done
+if curl -sf -m 5 http://127.0.0.1:4319/health; then
   echo ""
-  echo "— Jev Router service OK ($LABEL)"
+  echo "— Laya Router service OK ($LABEL)"
+else
+  echo "Router failed to become healthy; check $LOGDIR/jev-router.err.log" >&2
+  exit 1
 fi
 echo "Uninstall: launchctl bootout gui/\$(id -u)/$LABEL"

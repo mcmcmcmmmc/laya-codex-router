@@ -84,7 +84,7 @@ class TandemHandoff(unittest.TestCase):
         # log, or depend on the user's current fallback model configuration.
         tmp = self.enterContext(tempfile.TemporaryDirectory())
         for name in ("OFF_PATH", "SHADOW_PATH", "DEBUG_PATH", "SIGNATURE_PATH",
-                     "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH"):
+                     "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH", "BACKEND_PATH"):
             self.enterContext(mock.patch.object(jev, name, os.path.join(tmp, name)))
         self.enterContext(mock.patch.object(jev, "STATE", tmp))
         self.enterContext(mock.patch.object(jev, "GO_STANDARD", "fixture/standard"))
@@ -265,7 +265,11 @@ class TandemHandoff(unittest.TestCase):
             {"type": "response.completed",
              "response": {"id": "r", "status": "completed", "output": [item]}},
         ])
-        header = jev.answer_signature({"model": jev.GO_FRONTIER, "effort": "high"})
+        header = jev.answer_signature({
+            "model": jev.GO_FRONTIER,
+            "effort": "high",
+            "gate": f"codex_dry(manual):{jev.ASTRA}",
+        })
         for stream in (True, False):
             status, body = self.call(stream=stream, input=[
                 {"role": "assistant", "content": header + "Previous reply"},
@@ -293,7 +297,11 @@ class TandemHandoff(unittest.TestCase):
         }}):
             status, body = self.call(reasoning={"effort": "high"})
         self.assertEqual(status, 200)
-        actual = jev.answer_signature({"model": jev.ASTRA, "effort": "high"})
+        actual = jev.answer_signature({
+            "model": jev.ASTRA,
+            "effort": "high",
+            "gate": "shadow(astra)",
+        })
         self.assertEqual(json.loads(body)["output"][0]["content"][0]["text"], actual + "OK")
 
     def test_a_relayed_stream_repeats_the_id_it_opened_on(self):
